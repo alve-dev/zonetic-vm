@@ -1,0 +1,23 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Compilar VM",
+            "type": "shell",
+            "command": "g++",
+            "args": [
+                "-g",
+                "-std=c++20",
+                "-I${env:HOME}/zonetic-vm/include",
+                "${env:HOME}/zonetic-vm/src/*.cpp",
+                "-o",
+                "${env:HOME}/zonetic-vm/zonvm"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"]
+        }
+    ]
+}
