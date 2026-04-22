@@ -30,12 +30,11 @@ int main(int argc, char* argv[]) {
         vm.code.push_back(instruction);
     }
 
-    std::cout << "--- Iniciando ZonVM ---" << std::endl;
     vm.run();
 
-    for (int i = 0; i < 32; ++i) {
-        std::cout << "x" << i << ": " << vm.read_reg(i) << std::endl;
-    }
+    //for (int i = 0; i < 32; ++i) {
+    //    std::cout << "x" << i << ": " << vm.read_reg(i) << std::endl;
+    //}
 
     return 0;
 }

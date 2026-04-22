@@ -2,11 +2,12 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug Zon VM",
+            "name": "Debug Zon VM (Windows)",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${env:HOME}/zonetic-vm/zonvm", 
-            "args": ["${file}"], // Pasa 'r' y el archivo .zbc actual
+            // Ajustado para la carpeta de usuario en Windows y con .exe
+            "program": "${env:USERPROFILE}/.zonetic/.zonvm/zonvm.exe", 
+            "args": ["${file}"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
@@ -18,7 +19,10 @@
                     "ignoreFailures": true
                 }
             ],
-            "preLaunchTask": "Compilar VM" // Llama a la tarea de arriba antes de empezar
+            // RUTA OBLIGATORIA EN WINDOWS:
+            // Asegúrate de que esta ruta coincida con donde instalaste MinGW
+            "miDebuggerPath": "C:\\msys64\\ucrt64\\bin\\gdb.exe", 
+            "preLaunchTask": "Compilar VM" 
         }
     ]
 }

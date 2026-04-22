@@ -6,22 +6,22 @@
 namespace zonvm {
     struct VM {
         std::vector<word> code;
-        word* ip;
+        word* pc;
         Value registers[REGISTER_COUNT];
 
-        VM() : ip(nullptr) {
+        VM() : pc(nullptr) {
             for (int i = 0; i < REGISTER_COUNT; ++i) {
-                registers[i] = Value(0.0);
+                registers[i] = Value(0);
             }
         }
 
-        void write_reg(int reg, double val) {
+        void write_reg(byte reg, int32_t val) {
             if (reg == 0) return; 
             registers[reg].number = val;
         }
 
-        double read_reg(int reg) {
-            if (reg == 0) return 0.0;
+        int32_t read_reg(byte reg) {
+            if (reg == 0) return 0;
             return registers[reg].number;
         }
         void run();
