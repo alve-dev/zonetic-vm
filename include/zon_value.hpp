@@ -4,8 +4,8 @@
 
 namespace zonvm {
     struct Value {
-        double number;
+        int32_t number;
         Value() : number(0.0) {}
-        Value(double val) : number(val) {}
+        Value(int32_t val) : number(val) {}
     };
 }
