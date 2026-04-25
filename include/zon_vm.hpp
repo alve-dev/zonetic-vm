@@ -1,29 +1,22 @@
 #pragma once
 #include "common.hpp"
-#include "zon_value.hpp"
+#include <array>
+#include <cstdint>
 #include <vector>
 
 namespace zonvm {
     struct VM {
-        std::vector<word> code;
-        word* pc;
-        Value registers[REGISTER_COUNT];
+        std::vector<uint32_t> code;
+        uint32_t* pc;
+        std::array<int64_t, REGISTER_COUNT> regs{};
+        std::array<double, REGISTER_COUNT> fregs{};
+        uint32_t fcsr = 0;
 
-        VM() : pc(nullptr) {
-            for (int i = 0; i < REGISTER_COUNT; ++i) {
-                registers[i] = Value(0);
-            }
+        static inline int64_t sext(uint64_t val, int bits) {
+            uint64_t m = 1ULL << (bits - 1);
+            return (int64_t)((val ^ m) - m);
         }
 
-        void write_reg(byte reg, int32_t val) {
-            if (reg == 0) return; 
-            registers[reg].number = val;
-        }
-
-        int32_t read_reg(byte reg) {
-            if (reg == 0) return 0;
-            return registers[reg].number;
-        }
         void run();
     };
 }

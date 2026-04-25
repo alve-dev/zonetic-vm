@@ -7,7 +7,7 @@ using namespace zonvm;
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cout << "Uso: zonvm <archivo.zbc>" << std::endl;
+        std::cout << "Usage: zonvm <file.zbc>" << std::endl;
         return 1;
     }
 

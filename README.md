@@ -1,17 +1,20 @@
-# ZonVM — Virtual Machine (v2.1.0)
+# ZonVM — Virtual Machine (v2.2.0) "The 64-bit Update"
 
-ZonVM is the high-performance execution engine for the Zonetic programming language. It implements a virtual register-based architecture inspired by **RISC-V (RV32I + M Extension)**, optimized for mathematical precision, control logic, and robotics simulations.
+ZonVM is the high-performance execution engine for the Zonetic programming language. It implements a virtual register-based architecture inspired by **RISC-V (RV64I + M Extension + F Extension)**, optimized for mathematical precision, robotics simulations, and low-latency control.
 
-## What's New in v2.1.0
-- **Flow Control:** Full implementation of conditional branches (B-Type) for `if`, `elif`, and `else` structures.
-- **Boolean Logic:** Support for bitwise operations and comparisons (`AND`, `OR`, `XOR`, `SLT`).
-- **Scope Management:** Support for `BlockExpr` and dynamic register cleanup via scoped symbol tables.
+## What's New in v2.2.0
+- **64-bit Core:** Full transition to a 64-bit architecture for integer registers and memory addressing.
+- **Floating Point Unit (FPU):** Implementation of the **F Extension** for single-precision (32-bit) floating-point operations, mapped to internal double-precision storage for future compatibility.
+- **Hardware-Linked Ops:** Dedicated operators for speed, including power (`**`) and modulo (`%`) leveraging C++ intrinsics.
+- **System Calls (ABI):** Standardized `ECALL` services for I/O and execution control.
 
 ## Architecture Specifications
 
-The virtual machine operates under a **64-bit register model** (double precision) to ensure accuracy in physical and system-level calculations.
+The virtual machine operates under a **64-bit register model**. Integer registers (`x`) handle 64-bit signed values, while floating-point registers (`f`) handle IEEE 754 precision.
 
-### Registers and ABI
+### Integer Registers (x0 - x31)
+
+|### Registers and ABI
 
 | Register | Name | Description |
 | :--- | :--- | :--- |
@@ -26,52 +29,65 @@ The virtual machine operates under a **64-bit register model** (double precision
 | **x18 - x27** | s2 - s11 | Additional saved registers. |
 | **x28 - x31** | t3 - t6 | Additional temporal registers. |
 
-### Instruction Set (ISA)
+### Floating-Point Registers (f0 - f31)
 
-ZonVM processes 32-bit instructions using the following base formats:
+| Register | Name | Description |
+| :--- | :--- | :--- |
+| **f0 - f7** | ft0 - ft7 | FP Temporaries. |
+| **f8 - f9** | fs0 - fs1 | FP Saved registers. |
+| **f10 - f11** | fa0 - fa1 | FP Arguments and Return values. |
+| **f12 - f17** | fa2 - fa7 | FP Arguments. |
+| **f18 - f27** | fs2 - fs11 | FP Additional saved registers. |
+| **f28 - f31** | ft8 - ft11 | FP Additional temporaries. |
 
-#### R-Type (Register-Register)
-Arithmetic and logical operations between registers.
-- **Arithmetic:** `ADD`, `SUB`, `MUL`, `DIV`, `REM`.
-- **Logic:** `AND`, `OR`, `XOR`.
-- **Comparison:** `SLT` (Set Less Than), `SLTU` (Unsigned).
+## Instruction Set (ISA)
 
-#### I-Type (Immediates)
-Operations with 12-bit sign-extended constants.
-- **Arithmetic:** `ADDI` (used for `LI` and `MV`).
-- **Logic:** `ANDI`, `ORI`, `XORI`.
-- **Comparison:** `SLTI`, `SLTIU`.
+### Floating-Point Extension (RV32F)
+ZonVM now supports native floating-point arithmetic for robotics:
+- **Standard Ops:** `FADD.S`, `FSUB.S`, `FMUL.S`, `FDIV.S`.
+- **Sign Manipulation:** `FSGNJ.S` (Move/Copy), `FSGNJN.S` (Negate).
+- **Conversions:** `FCVT.W.S` (Float to Int), `FCVT.S.W` (Int to Float).
+- **Movement:** `FMV.S` (Move between FP registers), `FMV.W.X` (Int to Float bits).
+- **Comparisons:** `FEQ.S` (Equal), `FLT.S` (Less Than), `FLE.S` (Less or Equal).
 
-#### B-Type (Conditional Branches)
-Enables code branching based on register comparisons.
-- **Equality:** `BEQ` (Equal), `BNE` (Not Equal).
-- **Magnitude:** `BLT` (Less Than), `BGE` (Greater or Equal).
-- **Unsigned Magnitude:** `BLTU`, `BGEU`.
+### Standard Arithmetic & Logic
+- **M-Extension:** `MUL`, `DIV`, `REM` (Integer).
+- **I-Type / R-Type:** `ADD`, `SUB`, `AND`, `OR`, `XOR`, `SLT`, `SLTU`.
+- **Immediate Ops:** `ADDI`, `ANDI`, `ORI`, `XORI`, `SLTI`, `LUI`.
 
-#### System
-- **ECALL:** Invokes system services (e.g., `print`) depending on the value in register `a7`.
+### Flow Control (B-Type & J-Type)
+- **Branches:** `BEQ`, `BNE`, `BLT`, `BGE`, `BLTU`, `BGEU`.
+- **Jumps:** `JAL` (Jump and Link) for function calls and loops.
 
-## Control Structures and Scopes
+## System Services (ECALL)
 
-Version 2.1.0 introduces the capability to handle complex code blocks:
+System services are invoked by loading the Service ID into register **a7** (x17) and executing `ECALL`.
 
-1. **Short-Circuit Evaluation:** The Emitter generates direct jumps to optimize `and` and `or` operations, preventing unnecessary executions.
-2. **Jump Calculation:** Branch offsets in B-Type instructions are calculated during compile-time (2-pass assembly) to target precise `Labels`.
-3. **Block Context:** Local scope support; variables defined within an `if` or `elif` block are managed by releasing temporal registers upon exiting the context.
+| Service ID | Name | Description | Register Input |
+| :--- | :--- | :--- | :--- |
+| **93** | EXIT | Terminates VM execution. | - |
+| **1000** | IPRINT | Prints an integer. | `a0` (x10) |
+| **1001** | FPRINT | Prints a float. | `fa0` (f10) |
+| **1002** | BPRINT | Prints a boolean (`true`/`false`). | `a0` (x10) |
+
+## Example: Robotics Logic in Zonetic
 
 '''zon
--- Example of v2.1.0 logic
-inmut limit = 100
-if sensor < limit and active {
-    print(1)
-} else {
-    print(0)
+-- Logic for drone stability (v2.2.0)
+inmut target_alt: float = 12.5
+mut current_alt: float = sensor_read()
+
+if current_alt < target_alt {
+    inmut thrust = 1.5 ** 2.0  -- Power operation
+    print(thrust)
 }
 '''
 
-## File Format (.zbc)
+## Performance Optimization
 
-The VM only executes valid Zonetic bytecode files meeting the following structure:
+1. **Computed Gotos:** The VM uses a dispatch table for O(1) instruction decoding, significantly faster than traditional switch-case blocks.
+2. **Zero-Overhead Numbers:** Integers and Floats are handled directly in hardware registers.
+3. **C++ Intrinsics:** Operations like `%` (float modulo) and `**` (pow) use `std::fmod` and `std::pow` for maximum speed and IEEE 754 compliance.
 
-- **Magic Number:** `0x5A4F4E21` ("ZON!").
-- **Code Segment:** Binary stream of instructions encoded in **Little Endian**.
+---
+**ZonVM v2.2.0** - "Simulating the future, one byte at a time."
