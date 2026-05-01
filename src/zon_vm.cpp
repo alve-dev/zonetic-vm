@@ -1,6 +1,11 @@
 #include "zon_vm.hpp"
 #include <iostream>
 #include <bit>
+#include <cstring>
+#include <cmath>
+#include <limits>
+#include <format>
+#include <string>
 
 namespace zonvm {
     void VM::run() {
@@ -8,19 +13,60 @@ namespace zonvm {
         word* end = pc + code.size();
         
         static void* dispatch_table[128] = { &&unknown_op };
-        dispatch_table[OP_IMM] = &&exec_op_imm;
-        dispatch_table[OP]     = &&exec_op;
-        dispatch_table[OP_B]   = &&exec_op_b;
-        dispatch_table[JAL]    = &&exec_jal;
-        dispatch_table[ECALL]  = &&exec_ecall;
-        dispatch_table[LUI]    = &&exec_lui;
-        dispatch_table[OP_F]   = &&exec_op_f; 
+        dispatch_table[OP_IMM]    = &&exec_op_imm;
+        dispatch_table[OP_IMM_32] = &&exec_op_imm_32;
+        dispatch_table[OP]        = &&exec_op;
+        dispatch_table[OP_32]     = &&exec_op_32;
+        dispatch_table[OP_B]      = &&exec_op_b;
+        dispatch_table[JAL]       = &&exec_jal;
+        dispatch_table[ECALL]     = &&exec_ecall;
+        dispatch_table[LUI]       = &&exec_lui;
+        dispatch_table[OP_F]      = &&exec_op_f;
+        dispatch_table[FL]      = &&exec_fl;
+        dispatch_table[AUIPC]      = &&exec_auipc;
+        dispatch_table[L]      = &&exec_l;
 
         #define DISPATCH() \
-            if (pc >= end) return; \
             goto *dispatch_table[*pc & 0x7F]
-
+        
         DISPATCH();
+
+        exec_op_imm_32: {
+            word inst = *pc++;
+            byte rd = (inst >> 7) & 0x1F;
+            byte funct3 = (inst >> 12) & 0x7;
+            int32_t v1 = (int32_t)regs[((inst >> 15) & 0x1F)];
+            int32_t immI = (int32_t)sext(((inst >> 20) & 0xFFF), 12);
+
+            if (funct3 == ADD_SUB) {
+                regs[rd] = (int64_t)(v1 + immI); 
+            }
+            
+            regs[0] = 0;
+            DISPATCH();
+        }
+
+        exec_op_32: {
+            word inst = *pc++;
+            byte rd     = (inst >> 7) & 0x1F;
+            byte funct3 = (inst >> 12) & 0x7;
+            int32_t v1  = (int32_t)regs[((inst >> 15) & 0x1F)];
+            int32_t v2  = (int32_t)regs[((inst >> 20) & 0x1F)];
+            byte funct7 = (inst >> 25) & 0x7F;
+
+            if (funct7 == M_EXT_OR_FADD_D) {
+                if (funct3 == MUL)      regs[rd] = (int64_t)(v1 * v2);
+                else if (funct3 == DIV) regs[rd] = (v2 != 0) ? (int64_t)(v1 / v2) : 0;
+                else if (funct3 == REM) regs[rd] = (v2 != 0) ? (int64_t)(v1 % v2) : 0;
+            } else if (funct7 == STANDARD) {
+                if (funct3 == ADD_SUB)  regs[rd] = (int64_t)(v1 + v2);
+            } else if (funct7 == ALT) {
+                if (funct3 == ADD_SUB)  regs[rd] = (int64_t)(v1 - v2);
+            }
+
+            regs[0] = 0;
+            DISPATCH();
+        }
 
         exec_op_imm: {
             word inst = *pc++;
@@ -37,7 +83,6 @@ namespace zonvm {
             else if (funct3 == AND_ANDI) regs[rd] = v1 & immI;
 
             regs[0] = 0;
-            
             DISPATCH();
         }
 
@@ -46,43 +91,81 @@ namespace zonvm {
             byte rd = (inst >> 7) & 0x1F;
             regs[rd] = (int64_t)(int32_t)(inst & 0xFFFFF000);
             regs[0] = 0;
-
             DISPATCH();
         }
 
+        exec_auipc: {
+            word inst = *pc++;
+            uint32_t rd = (inst >> 7) & 0x1F;
+            int32_t imm = (int32_t)(inst & 0xFFFFF000);
+            uintptr_t relative_pc = (reinterpret_cast<uintptr_t>(pc - 1) - reinterpret_cast<uintptr_t>(code.data()));
+            regs[rd] = relative_pc + imm; 
+            DISPATCH();
+        }
 
         exec_op: {
             word inst = *pc++;
-            byte opcode = inst & 0x7F;
             byte rd      = (inst >> 7) & 0x1F;
             byte funct3  = (inst >> 12) & 0x7;
-            int64_t v1 = regs[((inst >> 15) & 0x1F)];
-            int64_t v2 = regs[((inst >> 20) & 0x1F)];
+            int64_t v1   = regs[((inst >> 15) & 0x1F)];
+            int64_t v2   = regs[((inst >> 20) & 0x1F)];
             byte funct7  = (inst >> 25) & 0x7F;
 
-            if (funct7 == M_EXT) {
-                if (funct3 == MUL) regs[rd] = v1 * v2;
-                else if (funct3 == DIV) {
-                    if (v2 != 0) regs[rd] = v1 / v2;
-                    else regs[rd] = 0;
-                } else if (funct3 == REM) {
-                    if (v2 != 0) regs[rd] = v1 % v2;
-                    else regs[rd] = 0;
-                }
+            if (funct7 == M_EXT_OR_FADD_D) {
+                if (funct3 == MUL)      regs[rd] = v1 * v2;
+                else if (funct3 == DIV) regs[rd] = (v2 != 0) ? v1 / v2 : 0;
+                else if (funct3 == REM) regs[rd] = (v2 != 0) ? v1 % v2 : 0;
             } else if (funct7 == STANDARD) {
-                if (funct3 == ADD_SUB) regs[rd] = v1 + v2;
-                else if (funct3 == SLT_SLTI) regs[rd] = (v1 < v2) ? 1 : 0;
+                if (funct3 == ADD_SUB)      regs[rd] = v1 + v2;
+                else if (funct3 == SLT_SLTI)  regs[rd] = (v1 < v2) ? 1 : 0;
                 else if (funct3 == SLTU_SLTIU) regs[rd] = ((uint64_t)v1 < (uint64_t)v2) ? 1 : 0;
-                else if (funct3 == XOR_XORI) regs[rd] = v1 ^ v2;
-                else if (funct3 == OR_ORI) regs[rd] = v1 | v2;
-                else if (funct3 == AND_ANDI) regs[rd] = v1 & v2;
-                
+                else if (funct3 == XOR_XORI)   regs[rd] = v1 ^ v2;
+                else if (funct3 == OR_ORI)     regs[rd] = v1 | v2;
+                else if (funct3 == AND_ANDI)   regs[rd] = v1 & v2;
             } else if (funct7 == ALT) {
-                if (funct3 == ADD_SUB) regs[rd] = v1 - v2;
+                if (funct3 == ADD_SUB)      regs[rd] = v1 - v2;
             }
 
             regs[0] = 0;
+            DISPATCH();
+        }
 
+        exec_l: {
+            word inst = *pc++;
+            uint32_t rd     = (inst >> 7) & 0x1F;
+            uint32_t funct3 = (inst >> 12) & 0x7;
+            uint32_t rs1    = (inst >> 15) & 0x1F;
+            int32_t imm     = static_cast<int32_t>(inst) >> 20;
+            
+            if (funct3 == LD) {
+                uintptr_t final_address = regs[rs1] + imm;
+                
+                int64_t val;
+                std::memcpy(&val, reinterpret_cast<const char*>(code.data()) + final_address, sizeof(int64_t));
+                
+                regs[rd] = val;
+            }
+
+            regs[0] = 0;
+            DISPATCH();
+        }
+
+        exec_fl: {
+            word inst = *pc++;
+            uint32_t rd     = (inst >> 7) & 0x1F;
+            uint32_t funct3 = (inst >> 12) & 0x7;
+            uint32_t rs1    = (inst >> 15) & 0x1F;
+            
+            int32_t imm = static_cast<int32_t>(inst) >> 20;
+
+            if (funct3 == FLD) {
+                uintptr_t final_offset = regs[rs1] + imm;
+
+                double val;
+                std::memcpy(&val, reinterpret_cast<const char*>(code.data()) + final_offset, sizeof(double));
+
+                fregs[rd] = val;
+            }
             DISPATCH();
         }
 
@@ -93,8 +176,12 @@ namespace zonvm {
             byte rs1    = (inst >> 15) & 0x1F;
             byte rs2    = (inst >> 20) & 0x1F;
             byte funct7 = (inst >> 25) & 0x7F;
- 
-            if (funct7 == FCVT_S_W) {
+            
+            if (funct7 == FMV_D_X) {
+                fregs[rd] = std::bit_cast<double>(regs[rs1]);
+            }
+
+            else if (funct7 == FCVT_S_W) {
                 float f = static_cast<float>((int32_t)regs[rs1]);
                 fregs[rd] = (double)f;
 
@@ -116,21 +203,36 @@ namespace zonvm {
                 float f1 = (float)fregs[rs1];
                 float f2 = (float)fregs[rs2];
                 fregs[rd] = (double)(f1 + f2);
-
+            
+            } else if (funct7 == M_EXT_OR_FADD_D) {
+                fregs[rd] = fregs[rs1] + fregs[rs2];
+            
             } else if (funct7 == FSUB_S) {
                 float f1 = (float)fregs[rs1];
                 float f2 = (float)fregs[rs2];
                 fregs[rd] = (double)(f1 - f2);
+                
+            } else if (funct7 == FSUB_D) {
+                fregs[rd] = fregs[rs1] - fregs[rs2];
 
             } else if (funct7 == FMUL_S) {
                 float f1 = (float)fregs[rs1];
                 float f2 = (float)fregs[rs2];
                 fregs[rd] = (double)(f1 * f2);
+
+            } else if (funct7 == FMUL_D) {
+                fregs[rd] = fregs[rs1] * fregs[rs2];
+            
             } else if (funct7 == FDIV_S) {
                 float f1 = (float)fregs[rs1];
                 float f2 = (float)fregs[rs2];
-                if (f2 == 0.0) fregs[rd] = 0.0;
+                if (std::abs(f2) < std::numeric_limits<float>::epsilon()) fregs[rd] = 0.0;
                 else fregs[rd] = (double)(f1 / f2);
+
+            } else if (funct7 == FDIV_D) {
+                double f2 = fregs[rs2];
+                if (std::abs(f2) < std::numeric_limits<double>::epsilon()) fregs[rd] = 0.0;
+                else fregs[rd] = fregs[rs1] / f2;
 
             } else if (funct7 == FCOMP_S) {
                 float f1 = (float)fregs[rs1];
@@ -192,9 +294,9 @@ namespace zonvm {
             switch (service)
             {
                 case EXIT: return; break;
-                case IPRINT: std::cout << regs[10] << std::endl; break;
-                case FPRINT: std::cout << fregs[10] << std::endl; break;
-                case BPRINT: (regs[10]) ? std::cout << "true" << std::endl : std::cout << "false" << std::endl;
+                case IPRINT: std::cout << std::format("{}\n", regs[10]); break;
+                case FPRINT: std::cout << std::format("{:.15g}\n", fregs[10]); break;
+                case BPRINT: (regs[10]) ? std::cout << std::format("{}\n", "true") : std::cout << std::format("{}\n", "false");
                 default: break;
             }
             

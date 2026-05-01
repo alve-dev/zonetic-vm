@@ -32,9 +32,9 @@ int main(int argc, char* argv[]) {
 
     vm.run();
 
-    //for (int i = 0; i < 32; ++i) {
-    //    std::cout << "x" << i << ": " << vm.read_reg(i) << std::endl;
-    //}
+    /*for (int i = 0; i < 32; ++i) {
+        std::cout << "x" << i << ": " << vm.regs[i] << std::endl;
+    }*/
 
     return 0;
 }
