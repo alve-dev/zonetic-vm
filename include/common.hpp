@@ -8,11 +8,13 @@ namespace zonvm {
     static constexpr byte REGISTER_COUNT = 32;
 
     enum OpCode : byte {
-        L = 0x03,
+        OP_L = 0x03,
         FL = 0x07,
         OP_IMM = 0x13,
         AUIPC = 0x17,
         OP_IMM_32 = 0x1B,
+        OP_S = 0x23,
+        OP_FS = 0x27,
         OP = 0x33,
         OP_32 = 0x3B,
         LUI = 0x37,
@@ -45,6 +47,14 @@ namespace zonvm {
         LD = 0x3
     };
 
+    enum F3_S: byte {
+        SD = 0x3
+    };
+
+    enum F3_FS: byte {
+        FSD = 0x3
+    };
+
     enum F3_B : byte {
         BEQ = 0x00,
         BNE = 0x01,
@@ -64,6 +74,7 @@ namespace zonvm {
         FDIV_S = 0x0C,
         FDIV_D = 0x0D,
         FSGNJ_S = 0x10,
+        FSGNJ_D = 0x11,
         ALT = 0x20,
         FCOMP_S = 0x50,
         FCVT_S_W = 0x68,
@@ -77,4 +88,4 @@ namespace zonvm {
         BPRINT = 1002,
         EXIT = 93
     };
-}
+} 

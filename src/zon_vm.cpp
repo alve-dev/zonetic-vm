@@ -10,21 +10,24 @@
 namespace zonvm {
     void VM::run() {
         pc = code.data();
+        regs[2] = static_cast<int64_t>(ram.size() - 16);
         word* end = pc + code.size();
         
         static void* dispatch_table[128] = { &&unknown_op };
-        dispatch_table[OP_IMM]    = &&exec_op_imm;
+        dispatch_table[OP_IMM] = &&exec_op_imm;
         dispatch_table[OP_IMM_32] = &&exec_op_imm_32;
-        dispatch_table[OP]        = &&exec_op;
-        dispatch_table[OP_32]     = &&exec_op_32;
-        dispatch_table[OP_B]      = &&exec_op_b;
-        dispatch_table[JAL]       = &&exec_jal;
-        dispatch_table[ECALL]     = &&exec_ecall;
-        dispatch_table[LUI]       = &&exec_lui;
-        dispatch_table[OP_F]      = &&exec_op_f;
-        dispatch_table[FL]      = &&exec_fl;
-        dispatch_table[AUIPC]      = &&exec_auipc;
-        dispatch_table[L]      = &&exec_l;
+        dispatch_table[OP] = &&exec_op;
+        dispatch_table[OP_32] = &&exec_op_32;
+        dispatch_table[OP_B] = &&exec_op_b;
+        dispatch_table[JAL] = &&exec_jal;
+        dispatch_table[ECALL] = &&exec_ecall;
+        dispatch_table[LUI] = &&exec_lui;
+        dispatch_table[OP_F] = &&exec_op_f;
+        dispatch_table[FL] = &&exec_fl;
+        dispatch_table[AUIPC] = &&exec_auipc;
+        dispatch_table[OP_L] = &&exec_l;
+        dispatch_table[OP_S] = &&exec_s;
+        dispatch_table[OP_FS] = &&exec_fs;
 
         #define DISPATCH() \
             goto *dispatch_table[*pc & 0x7F]
@@ -32,6 +35,7 @@ namespace zonvm {
         DISPATCH();
 
         exec_op_imm_32: {
+            std::cout << "op_imm_32\n";
             word inst = *pc++;
             byte rd = (inst >> 7) & 0x1F;
             byte funct3 = (inst >> 12) & 0x7;
@@ -47,6 +51,8 @@ namespace zonvm {
         }
 
         exec_op_32: {
+            std::cout << "op_32\n";
+
             word inst = *pc++;
             byte rd     = (inst >> 7) & 0x1F;
             byte funct3 = (inst >> 12) & 0x7;
@@ -69,6 +75,8 @@ namespace zonvm {
         }
 
         exec_op_imm: {
+            std::cout << "op_imm\n";
+
             word inst = *pc++;
             byte rd = (inst >> 7) & 0x1F;
             byte funct3 = (inst >> 12) & 0x7;
@@ -87,6 +95,8 @@ namespace zonvm {
         }
 
         exec_lui: {
+            std::cout << "lui\n";
+
             word inst = *pc++;
             byte rd = (inst >> 7) & 0x1F;
             regs[rd] = (int64_t)(int32_t)(inst & 0xFFFFF000);
@@ -95,8 +105,10 @@ namespace zonvm {
         }
 
         exec_auipc: {
+            std::cout << "auipc\n";
+
             word inst = *pc++;
-            uint32_t rd = (inst >> 7) & 0x1F;
+            byte rd = (inst >> 7) & 0x1F;
             int32_t imm = (int32_t)(inst & 0xFFFFF000);
             uintptr_t relative_pc = (reinterpret_cast<uintptr_t>(pc - 1) - reinterpret_cast<uintptr_t>(code.data()));
             regs[rd] = relative_pc + imm; 
@@ -104,6 +116,8 @@ namespace zonvm {
         }
 
         exec_op: {
+            std::cout << "op\n";
+
             word inst = *pc++;
             byte rd      = (inst >> 7) & 0x1F;
             byte funct3  = (inst >> 12) & 0x7;
@@ -131,30 +145,92 @@ namespace zonvm {
         }
 
         exec_l: {
+            std::cout << "L\n";
+
             word inst = *pc++;
-            uint32_t rd     = (inst >> 7) & 0x1F;
-            uint32_t funct3 = (inst >> 12) & 0x7;
-            uint32_t rs1    = (inst >> 15) & 0x1F;
+            byte rd     = (inst >> 7) & 0x1F;
+            byte funct3 = (inst >> 12) & 0x7;
+            byte rs1    = (inst >> 15) & 0x1F;
             int32_t imm     = static_cast<int32_t>(inst) >> 20;
             
             if (funct3 == LD) {
                 uintptr_t final_address = regs[rs1] + imm;
-                
                 int64_t val;
-                std::memcpy(&val, reinterpret_cast<const char*>(code.data()) + final_address, sizeof(int64_t));
-                
-                regs[rd] = val;
+                if (rs1 == 2 || rs1 == 8) {
+                    if (final_address + 8 <= ram.size()) {
+                        std::memcpy(&val, &ram[final_address], sizeof(int64_t));
+                        regs[rd] = val;
+                    } else {
+                        std::cout << "ERROR EN LD TEMPORAL\n";
+                    }
+                } else {
+                    std::memcpy(&val, reinterpret_cast<const char*>(code.data()) + final_address, sizeof(int64_t));
+                    regs[rd] = val;
+                }
             }
 
             regs[0] = 0;
             DISPATCH();
         }
 
-        exec_fl: {
+        exec_s : {
+            std::cout << "S\n";
+
             word inst = *pc++;
-            uint32_t rd     = (inst >> 7) & 0x1F;
+            byte funct3 = (inst >> 12) & 0x7;
+            byte rs1 = (inst >> 15) & 0x1F;
+            byte rs2 = (inst >> 20) & 0x1F;
+
+            int32_t imm_11_5 = static_cast<int32_t>(inst) >> 25;
+            int32_t imm_4_0  = (inst >> 7) & 0x1F;
+            int32_t imm = (imm_11_5 << 5) | imm_4_0;
+
+            if (funct3 == SD) {
+                uintptr_t final_address = regs[rs1] + imm;
+
+                if (final_address + 8 <= ram.size()) {
+                    int64_t val = regs[rs2];
+                    std::memcpy(&ram[final_address], &val, sizeof(int64_t));
+                } else {
+                    std::cout << "ERROR EN LD TEMPORAL\n";
+                }
+            }
+            DISPATCH();
+        }
+
+        exec_fs : {
+            std::cout << "FS\n";
+
+            word inst = *pc++;
+            byte funct3 = (inst >> 12) & 0x7;
+            byte rs1 = (inst >> 15) & 0x1F;
+            byte rs2 = (inst >> 20) & 0x1F;
+
+            int32_t imm_11_5 = static_cast<int32_t>(inst) >> 25;
+            int32_t imm_4_0  = (inst >> 7) & 0x1F;
+            int32_t imm = (imm_11_5 << 5) | imm_4_0;
+
+            if (funct3 == FSD) {
+                uintptr_t final_address = regs[rs1] + imm;
+
+                if (final_address + 8 <= ram.size()) {
+                    double val = fregs[rs2];
+                    std::memcpy(&ram[final_address], &val, sizeof(double));
+                } else {
+                    std::cout << "ERROR EN LD TEMPORAL\n";
+                }
+            }
+            DISPATCH();
+        }
+
+
+        exec_fl: {
+            std::cout << "FL\n";
+
+            word inst = *pc++;
+            byte rd     = (inst >> 7) & 0x1F;
             uint32_t funct3 = (inst >> 12) & 0x7;
-            uint32_t rs1    = (inst >> 15) & 0x1F;
+            byte rs1    = (inst >> 15) & 0x1F;
             
             int32_t imm = static_cast<int32_t>(inst) >> 20;
 
@@ -162,14 +238,24 @@ namespace zonvm {
                 uintptr_t final_offset = regs[rs1] + imm;
 
                 double val;
-                std::memcpy(&val, reinterpret_cast<const char*>(code.data()) + final_offset, sizeof(double));
-
-                fregs[rd] = val;
+                if (rs1 == 2 || rs1 == 8) {
+                    if (final_offset + 8 <= ram.size()) {
+                        std::memcpy(&val, &ram[final_offset], sizeof(int64_t));
+                        fregs[rd] = val;
+                    } else {
+                        std::cout << "ERROR EN LD TEMPORAL\n";
+                    }
+                } else {
+                    std::memcpy(&val, reinterpret_cast<const char*>(code.data()) + final_offset, sizeof(double));
+                    fregs[rd] = val;
+                }
             }
             DISPATCH();
         }
 
         exec_op_f: {
+            std::cout << "op_f\n";
+
             word inst = *pc++;
             byte rd     = (inst >> 7)  & 0x1F;
             byte rm     = (inst >> 12) & 0x07;
@@ -185,16 +271,16 @@ namespace zonvm {
                 float f = static_cast<float>((int32_t)regs[rs1]);
                 fregs[rd] = (double)f;
 
-            } else if (funct7 == FSGNJ_S) { 
-                uint32_t f1 = std::bit_cast<uint32_t>((float)fregs[rs1]);
-                uint32_t f2 = std::bit_cast<uint32_t>((float)fregs[rs2]);
-                uint32_t res_bits;
+            } else if (funct7 == FSGNJ_S) {
+                uint32_t b1 = std::bit_cast<uint32_t>((float)fregs[rs1]);
+                uint32_t b2 = std::bit_cast<uint32_t>((float)fregs[rs2]);
+                fregs[rd] = (double)std::bit_cast<float>(perform_sign_injection<float, uint32_t>(b1, b2, rm));
 
-                if (rm == 0x00) res_bits = (f1 & 0x7FFFFFFF) | (f2 & 0x80000000);
-                else if (rm == 0x01) res_bits = (f1 & 0x7FFFFFFF) | ((f2 & 0x80000000) ^ 0x80000000);
-
-                fregs[rd] = (double)std::bit_cast<float>(res_bits);
-
+            } else if (funct7 == FSGNJ_D) {
+                uint64_t b1 = std::bit_cast<uint64_t>(fregs[rs1]);
+                uint64_t b2 = std::bit_cast<uint64_t>(fregs[rs2]);
+                fregs[rd] = std::bit_cast<double>(perform_sign_injection<double, uint64_t>(b1, b2, rm));
+            
             } else if (funct7 == FMV_W_X) {
                 float f = std::bit_cast<float>((uint32_t)regs[rs1]);
                 fregs[rd] = (double)f;
@@ -248,6 +334,8 @@ namespace zonvm {
         }
 
         exec_op_b: {
+            std::cout << "op_B\n";
+
             word inst = *pc++;
             uint64_t b12   = (inst >> 31) & 0x1;
             uint64_t b11   = (inst >> 7)  & 0x1;
@@ -275,6 +363,8 @@ namespace zonvm {
         }
 
         exec_jal: {
+            std::cout << "JAL\n";
+
             word inst = *pc++;
             uint64_t off20     = (inst >> 31) & 0x1;
             uint64_t off19_12 = (inst >> 12) & 0xFF;
@@ -289,6 +379,8 @@ namespace zonvm {
         }
 
         exec_ecall: {
+            std::cout << "ECALL: " << regs[17] << "\n";
+
             pc++;
             int64_t service = regs[17];
             switch (service)
@@ -308,4 +400,4 @@ namespace zonvm {
             return;
         }
     }
-}
+} 
