@@ -135,4 +135,4 @@ These registers are **never allocated by the register allocator**, ensuring they
 4. **Tail Call Optimization:** Recursive tail calls are eliminated at compile time, reducing stack pressure.
 5. **Guard Page Protection:** Stack overflow is caught at the hardware level using OS memory protection, not software checks.
 
-**Link to the Zonetic Compiler repository** -> [click here](https://github.com/alve-dev/zonetic-compiler/tree/main)
+**Link to the Zonetic Compiler repository** -> [click here](https://github.com/alve-dev/zonetic-compiler/tree/main) 
