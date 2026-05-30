@@ -26,3 +26,32 @@
         }
     ]
 }
+
+
+/*{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Zon VM (Linux)",
+            "type": "cppdbg",
+            "request": "launch",
+            // Se usa ${env:HOME} para la carpeta de usuario en Linux y se quita el .exe
+            "program": "${env:HOME}/.zonetic/.zonvm/zonvm", 
+            "args": ["${file}"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            // En Linux, GDB casi siempre está en el PATH global (/usr/bin/gdb)
+            "miDebuggerPath": "/usr/bin/gdb", 
+            "preLaunchTask": "Compilar VM" 
+        }
+    ]
+}*/

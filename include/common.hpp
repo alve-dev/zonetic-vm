@@ -20,6 +20,7 @@ namespace zonvm {
         LUI = 0x37,
         OP_F = 0x53,
         OP_B = 0x63,
+        JALR = 0x67,
         JAL = 0x6F,
         ECALL = 0x73
     };
