@@ -49,10 +49,8 @@ int main(int argc, char* argv[]) {
 
     uint32_t instruction;
     uint32_t text_words = text_size / 4;
-    for (uint32_t i = 0; i < text_words; i++) {
-        file.read(reinterpret_cast<char*>(&instruction), 4);
-        vm.code.push_back(instruction);
-    }
+    std::vector<uint8_t> text_code(text_size);
+    file.read(reinterpret_cast<char*>(text_code.data()), text_size);
 
     std::vector<uint8_t> pool_bytes(pool_size);
     if (pool_size > 0) {
@@ -64,7 +62,7 @@ int main(int argc, char* argv[]) {
         file.read(reinterpret_cast<char*>(data_bytes.data()), data_size);
     }
 
-    vm.load(entry_point, data_bytes, pool_bytes);
+    vm.load(entry_point, text_code, pool_bytes, data_bytes);
     vm.run();
 
     return 0;

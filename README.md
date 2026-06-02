@@ -92,9 +92,11 @@ System services are invoked by loading the Service ID into register **a7** (x17)
 | Service ID | Name | Description | Input |
 | :--- | :--- | :--- | :--- |
 | **93** | EXIT | Terminates VM execution with code in `a0`. | `a0` (exit code) |
-| **1000** | IPRINT | Prints a 64-bit signed integer. | `a0` (value) |
-| **1001** | FPRINT | Prints a double-precision float. | `fa0` (value) |
-| **1002** | BPRINT | Prints a boolean (`true`/`false`). | `a0` (0=false, else true) |
+| **-1** | IPRINT | Prints a 64-bit signed integer. | `a0` (value) |
+| **-2** | FPRINT | Prints a double-precision float. | `fa0` (value) |
+| **-3** | BPRINT | Prints a boolean (`true`/`false`). | `a0` (0=false, else true) |
+| **-4** | SPRINT | Prints a string. | `a0` (address to a pointer) |
+| **-5** | EPRINT | Prints a newline(`\n`). | None |
 
 ## Stack Management & Function Calling
 
@@ -135,4 +137,4 @@ These registers are **never allocated by the register allocator**, ensuring they
 4. **Tail Call Optimization:** Recursive tail calls are eliminated at compile time, reducing stack pressure.
 5. **Guard Page Protection:** Stack overflow is caught at the hardware level using OS memory protection, not software checks.
 
-**Link to the Zonetic Compiler repository** -> [click here](https://github.com/alve-dev/zonetic-compiler/tree/main) 
+> Link to the Zonetic Compiler repository -> [click here](https://github.com/alve-dev/zonetic-compiler/tree/main) 

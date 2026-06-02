@@ -4,111 +4,19 @@
 #include <cstring>
 #include <cmath>
 #include <string>
-#include <csignal>
-#include <csetjmp>
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
+#include <limits>
 
 namespace zonvm {
-    static std::jmp_buf execution_rescue_point;
-
-    #ifdef _WIN32
-        LONG WINAPI zonetic_windows_exception_handler(PEXCEPTION_POINTERS exception_info) {
-            if (exception_info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-                std::cout << "\n[zon error]: Stack Overflow, [X_X] <(\"You exceeded the 128KB stack limit\")\n";
-                std::longjmp(execution_rescue_point, 1);
-            }
-            
-            return EXCEPTION_CONTINUE_SEARCH;
-        }
-    #else
-        static void zonetic_stack_overflow_handler(int signum, siginfo_t* info, void* context) {
-            std::cout << "\n[zon error]: Stack Overflow, [X_X] <(\"You exceeded the 128KB stack limit\")\n";
-            std::longjmp(execution_rescue_point, 1);
-        }
-    #endif
-
-    static uint8_t* allocate_protected_ram(size_t total_ram_size, size_t stack_limit_size) {
-    #ifdef _WIN32
-        uint8_t* raw_ram = reinterpret_cast<uint8_t*>(VirtualAlloc(
-            nullptr, total_ram_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
-        ));
-
-        if (!raw_ram) {
-            std::cerr << "[zon error]: [zon error]: The virtual memory (Windows) could not be mapped..\n";
-            std::exit(1);
-        }
-
-        SYSTEM_INFO si;
-        GetSystemInfo(&si);
-        size_t page_size = si.dwPageSize;
-
-        size_t guard_offset = (total_ram_size - stack_limit_size) & ~(page_size - 1);
-        uint8_t* guard_page_address = raw_ram + guard_offset;
-
-        DWORD old_protect;
-        VirtualProtect(guard_page_address, page_size, PAGE_NOACCESS, &old_protect);
-
-        AddVectoredExceptionHandler(1, zonetic_windows_exception_handler);
-        
-        return raw_ram;
-
-    #else
-        size_t page_size = sysconf(_SC_PAGESIZE);
-        uint8_t* raw_ram = reinterpret_cast<uint8_t*>(mmap(
-            nullptr, total_ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
-        ));
-
-        if (raw_ram == MAP_FAILED) {
-            std::cerr << "[zon error]: The virtual memory (mmap) could not be mapped.\n";
-            std::exit(1);
-        }
-
-        size_t guard_offset = (total_ram_size - stack_limit_size) & ~(page_size - 1);
-        uint8_t* guard_page_address = raw_ram + guard_offset;
-
-        if (mprotect(guard_page_address, page_size, PROT_NONE) == -1) {
-            std::cerr << "[zon error]: Failed to pin mprotect to the Stack\n";
-            std::exit(1);
-        }
-        
-        struct sigaction sa;
-        sa.sa_sigaction = zonetic_stack_overflow_handler;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = SA_SIGINFO;
-        sigaction(SIGSEGV, &sa, nullptr);
-
-        return raw_ram;
-    #endif
-    }
-
-    void free_protected_ram(uint8_t* ram_ptr, size_t total_size) {
-    #ifdef _WIN32
-        VirtualFree(ram_ptr, 0, MEM_RELEASE);
-    #else
-        munmap(ram_ptr, total_size);
-    #endif
-    }
 
     void VM::run() {
-        pc = code.data();
-        word* end = pc + code.size();
-
-        const size_t RAM_SIZE = 1024 * 1024;
-        const size_t STACK_LIMIT = 1024 * 128;
-        
-        uint8_t* protected_ram = allocate_protected_ram(RAM_SIZE, STACK_LIMIT);
-
-        regs[2] = static_cast<int64_t>(RAM_SIZE - 16);
-
         if (setjmp(execution_rescue_point) != 0) {
-            free_protected_ram(protected_ram, RAM_SIZE);
-            return; 
+            free_ram(ram);
+            return;
         }
+
+        uint32_t* text_base = reinterpret_cast<uint32_t*>(ram);
+
+        const uint32_t STACK_GUARD = static_cast<uint32_t>(RAM_SIZE - STACK_LIMIT);
 
         static void* dispatch_table[128] = { &&unknown_op };
         dispatch_table[OP_IMM]    = &&exec_op_imm;
@@ -126,62 +34,155 @@ namespace zonvm {
         dispatch_table[OP_S]      = &&exec_s;
         dispatch_table[OP_FS]     = &&exec_fs;
         dispatch_table[JALR]      = &&exec_jalr;
+        dispatch_table[OP_STR]     = &&exec_op_str;
+        //dispatch_table[OP_IMM_STR] = &&exec_op_str_imm;
 
-        #define DISPATCH() \
-            goto *dispatch_table[*pc & 0x7F]
-        
+        #define DISPATCH() goto *dispatch_table[*pc & 0x7F]
+
         DISPATCH();
 
-        exec_op_imm_32: {
+        exec_op_str: {
             word inst = *pc++;
-            byte rd = (inst >> 7) & 0x1F;
+            byte rd   = (inst >> 7) & 0x1F;
             byte funct3 = (inst >> 12) & 0x7;
-            int32_t v1 = (int32_t)regs[((inst >> 15) & 0x1F)];
-            int32_t immI = (int32_t)sext(((inst >> 20) & 0xFFF), 12);
-
-            if (funct3 == ADD_SUB) {
-                regs[rd] = (int64_t)(v1 + immI); 
-            }
+            byte rs1 = (inst >> 15) & 0x1F;
+            byte rs2 = (inst >> 20) & 0x1F;
+            byte funct7 = (inst >> 25) & 0x7F;
             
+            if (funct7 == STANDARD_STR) {
+                if (funct3 == CONCAT) {
+                    uint64_t ptr_a = regs[rs1];
+                    uint64_t ptr_b = regs[rs2];
+                    
+                    uint64_t len_a, len_b;
+                    std::memcpy(&len_a, &ram[ptr_a], 8);
+                    std::memcpy(&len_b, &ram[ptr_b], 8);
+                    
+                    uint64_t new_len = len_a + len_b;
+                    uint64_t alloc_size = 8 + new_len + 1;
+                    uint64_t aligned = (alloc_size + 7) & ~7;
+                    
+                    uint32_t stack_guard = static_cast<uint32_t>(RAM_SIZE - STACK_LIMIT);
+                    if (heap_bump + aligned >= stack_guard) {
+                        regs[rd] = 0;
+                        DISPATCH();
+                    }
+                    
+                    uint64_t dest_ptr = heap_bump;
+                    heap_bump += aligned;
+                    
+                    std::memcpy(&ram[dest_ptr], &new_len, 8);
+                    std::memcpy(&ram[dest_ptr + 8], &ram[ptr_a + 8], len_a);
+                    std::memcpy(&ram[dest_ptr + 8 + len_a], &ram[ptr_b + 8], len_b);
+                    ram[dest_ptr + 8 + new_len] = '\0';
+                    
+                    regs[rd] = dest_ptr;
+                }
+                else if (funct3 == EQ_STR) {
+                    uint64_t ptr_a = regs[rs1];
+                    uint64_t ptr_b = regs[rs2];
+                    
+                    uint64_t len_a, len_b;
+                    std::memcpy(&len_a, &ram[ptr_a], 8);
+                    std::memcpy(&len_b, &ram[ptr_b], 8);
+                    
+                    if (len_a != len_b) {
+                        regs[rd] = 0;
+                        DISPATCH();             
+                    }
+                    
+                    int cmp = std::memcmp(&ram[ptr_a + 8], &ram[ptr_b + 8], len_a);
+                    regs[rd] = (cmp == 0) ? 1 : 0;
+                }
+            }
+            DISPATCH();
+        }
+        
+        /*exec_op_str_imm: {
+            word inst = *pc++;
+            byte rd   = (inst >> 7) & 0x1F;
+            byte funct3 = (inst >> 12) & 0x7;
+            byte rs1 = (inst >> 15) & 0x1F;
+            int64_t imm = sext((inst >> 20) & 0xFFF, 12);
+            
+            if (funct3 == F3_STR_LEN) {
+                uint64_t ptr = regs[rs1];
+                uint64_t len;
+                std::memcpy(&len, &ram[ptr], 8);
+                regs[rd] = static_cast<int64_t>(len) + imm;  // imm permite desplazamiento
+            }
+            else if (funct3 == F3_STR_INDEX) {
+                uint64_t ptr = regs[rs1];
+                uint64_t index = static_cast<uint64_t>(regs[rd]);  // o rs2? cuidado
+                uint64_t len;
+                std::memcpy(&len, &ram[ptr], 8);
+                if (index < len) {
+                    regs[rd] = static_cast<int64_t>(ram[ptr + 8 + index]);
+                } else {
+                    regs[rd] = 0;
+                }
+            }
+            DISPATCH();
+        }*/
+
+        exec_op_imm_32: {
+            word inst   = *pc++;
+            byte rd     = (inst >> 7)  & 0x1F;
+            byte funct3 = (inst >> 12) & 0x7;
+            int32_t v1  = static_cast<int32_t>(regs[(inst >> 15) & 0x1F]);
+            int32_t imm = static_cast<int32_t>(sext((inst >> 20) & 0xFFF, 12));
+            if (funct3 == ADD_SUB) regs[rd] = static_cast<int64_t>(v1 + imm);
             regs[0] = 0;
             DISPATCH();
         }
 
         exec_op_32: {
-            word inst = *pc++;
-            byte rd     = (inst >> 7) & 0x1F;
+            word inst   = *pc++;
+            byte rd     = (inst >> 7)  & 0x1F;
             byte funct3 = (inst >> 12) & 0x7;
-            int32_t v1  = (int32_t)regs[((inst >> 15) & 0x1F)];
-            int32_t v2  = (int32_t)regs[((inst >> 20) & 0x1F)];
+            int32_t v1  = static_cast<int32_t>(regs[(inst >> 15) & 0x1F]);
+            int32_t v2  = static_cast<int32_t>(regs[(inst >> 20) & 0x1F]);
             byte funct7 = (inst >> 25) & 0x7F;
-
-            if (funct7 == M_EXT_OR_FADD_D) {
-                if (funct3 == MUL)      regs[rd] = (int64_t)(v1 * v2);
-                else if (funct3 == DIV) regs[rd] = (v2 != 0) ? (int64_t)(v1 / v2) : 0;
-                else if (funct3 == REM) regs[rd] = (v2 != 0) ? (int64_t)(v1 % v2) : 0;
+            if      (funct7 == M_EXT_OR_FADD_D) {
+                if      (funct3 == MUL) regs[rd] = static_cast<int64_t>(v1 * v2);
+                else if (funct3 == DIV) regs[rd] = (v2 != 0) ? static_cast<int64_t>(v1 / v2) : 0;
+                else if (funct3 == REM) regs[rd] = (v2 != 0) ? static_cast<int64_t>(v1 % v2) : 0;
             } else if (funct7 == STANDARD) {
-                if (funct3 == ADD_SUB)  regs[rd] = (int64_t)(v1 + v2);
+                if (funct3 == ADD_SUB) regs[rd] = static_cast<int64_t>(v1 + v2);
             } else if (funct7 == ALT) {
-                if (funct3 == ADD_SUB)  regs[rd] = (int64_t)(v1 - v2);
+                if (funct3 == ADD_SUB) regs[rd] = static_cast<int64_t>(v1 - v2);
             }
-
             regs[0] = 0;
             DISPATCH();
         }
 
         exec_op_imm: {
-            word inst = *pc++;
-            byte rd = (inst >> 7) & 0x1F;
+            word inst   = *pc++;
+            byte rd     = (inst >> 7)  & 0x1F;
             byte funct3 = (inst >> 12) & 0x7;
-            int64_t v1 = regs[((inst >> 15) & 0x1F)];
-            int64_t immI = sext(((inst >> 20) & 0xFFF), 12);
+            int64_t v1  = regs[(inst >> 15) & 0x1F];
+            int64_t imm = sext((inst >> 20) & 0xFFF, 12);
 
-            if (funct3 == ADD_SUB) regs[rd] = v1 + immI;
-            else if (funct3 == SLT_SLTI) regs[rd] = (v1 < immI) ? 1 : 0;
-            else if (funct3 == SLTU_SLTIU) regs[rd]= ((uint64_t)v1 < (uint64_t)immI) ? 1 : 0;
-            else if (funct3 == XOR_XORI) regs[rd] = v1 ^ immI;
-            else if (funct3 == OR_ORI) regs[rd] = v1 | immI;
-            else if (funct3 == AND_ANDI) regs[rd] = v1 & immI;
+            if      (funct3 == ADD_SUB)    regs[rd] = v1 + imm;
+            else if (funct3 == SLL_SLLI)   regs[rd] = v1 << (imm & 0x3F);
+            else if (funct3 == SLT_SLTI)   regs[rd] = (v1 < imm) ? 1 : 0;
+            else if (funct3 == SLTU_SLTIU) regs[rd] = (static_cast<uint64_t>(v1) < static_cast<uint64_t>(imm)) ? 1 : 0;
+            else if (funct3 == XOR_XORI)   regs[rd] = v1 ^ imm;
+            else if (funct3 == OR_ORI)     regs[rd] = v1 | imm;
+            else if (funct3 == AND_ANDI)   regs[rd] = v1 & imm;
+            else if (funct3 == SRL_SRA_SRLI_SRAI) {
+                uint64_t shamt = static_cast<uint64_t>(imm) & 0x3F;
+                bool arith = (inst >> 30) & 1;
+                regs[rd] = arith ? (static_cast<int64_t>(v1) >> shamt)
+                                 : (static_cast<uint64_t>(v1) >> shamt);
+            }
+
+            // Stack overflow check cuando sp cambia
+            if (rd == 2 && static_cast<uint64_t>(regs[2]) < STACK_GUARD) {
+                std::cout << "\n[zon error]: Stack Overflow, [X_X] <(\"You exceeded the 128KB stack limit\")\n";
+                free_ram(ram);
+                std::exit(1);
+            }
 
             regs[0] = 0;
             DISPATCH();
@@ -189,42 +190,46 @@ namespace zonvm {
 
         exec_lui: {
             word inst = *pc++;
-            byte rd = (inst >> 7) & 0x1F;
-            regs[rd] = (int64_t)(int32_t)(inst & 0xFFFFF000);
-            regs[0] = 0;
+            byte rd   = (inst >> 7) & 0x1F;
+            regs[rd]  = static_cast<int64_t>(static_cast<int32_t>(inst & 0xFFFFF000));
+            regs[0]   = 0;
             DISPATCH();
         }
 
         exec_auipc: {
-            word inst = *pc++;
-            byte rd = (inst >> 7) & 0x1F;
-            int32_t imm = (int32_t)(inst & 0xFFFFF000);
-            uintptr_t relative_pc = (reinterpret_cast<uintptr_t>(pc - 1) - reinterpret_cast<uintptr_t>(code.data()));
-            regs[rd] = relative_pc + imm; 
+            word inst    = *pc++;
+            byte rd      = (inst >> 7) & 0x1F;
+            int32_t imm  = static_cast<int32_t>(inst & 0xFFFFF000);
+            uintptr_t pc_byte_offset = reinterpret_cast<uintptr_t>(pc - 1)
+                                     - reinterpret_cast<uintptr_t>(ram);
+            regs[rd] = static_cast<int64_t>(pc_byte_offset) + imm;
             DISPATCH();
         }
 
         exec_op: {
-            word inst = *pc++;
-            byte rd      = (inst >> 7) & 0x1F;
-            byte funct3  = (inst >> 12) & 0x7;
-            int64_t v1   = regs[((inst >> 15) & 0x1F)];
-            int64_t v2   = regs[((inst >> 20) & 0x1F)];
-            byte funct7  = (inst >> 25) & 0x7F;
+            word inst   = *pc++;
+            byte rd     = (inst >> 7)  & 0x1F;
+            byte funct3 = (inst >> 12) & 0x7;
+            int64_t v1  = regs[(inst >> 15) & 0x1F];
+            int64_t v2  = regs[(inst >> 20) & 0x1F];
+            byte funct7 = (inst >> 25) & 0x7F;
 
             if (funct7 == M_EXT_OR_FADD_D) {
-                if (funct3 == MUL)      regs[rd] = v1 * v2;
+                if      (funct3 == MUL) regs[rd] = v1 * v2;
                 else if (funct3 == DIV) regs[rd] = (v2 != 0) ? v1 / v2 : 0;
                 else if (funct3 == REM) regs[rd] = (v2 != 0) ? v1 % v2 : 0;
             } else if (funct7 == STANDARD) {
-                if (funct3 == ADD_SUB)      regs[rd] = v1 + v2;
-                else if (funct3 == SLT_SLTI)  regs[rd] = (v1 < v2) ? 1 : 0;
-                else if (funct3 == SLTU_SLTIU) regs[rd] = ((uint64_t)v1 < (uint64_t)v2) ? 1 : 0;
-                else if (funct3 == XOR_XORI)   regs[rd] = v1 ^ v2;
-                else if (funct3 == OR_ORI)     regs[rd] = v1 | v2;
-                else if (funct3 == AND_ANDI)   regs[rd] = v1 & v2;
+                if      (funct3 == ADD_SUB)          regs[rd] = v1 + v2;
+                else if (funct3 == SLL_SLLI)         regs[rd] = v1 << (v2 & 0x3F);
+                else if (funct3 == SLT_SLTI)         regs[rd] = (v1 < v2) ? 1 : 0;
+                else if (funct3 == SLTU_SLTIU)       regs[rd] = (static_cast<uint64_t>(v1) < static_cast<uint64_t>(v2)) ? 1 : 0;
+                else if (funct3 == XOR_XORI)         regs[rd] = v1 ^ v2;
+                else if (funct3 == OR_ORI)           regs[rd] = v1 | v2;
+                else if (funct3 == AND_ANDI)         regs[rd] = v1 & v2;
+                else if (funct3 == SRL_SRA_SRLI_SRAI) regs[rd] = static_cast<uint64_t>(v1) >> (v2 & 0x3F);
             } else if (funct7 == ALT) {
-                if (funct3 == ADD_SUB)      regs[rd] = v1 - v2;
+                if      (funct3 == ADD_SUB)          regs[rd] = v1 - v2;
+                else if (funct3 == SRL_SRA_SRLI_SRAI) regs[rd] = v1 >> (v2 & 0x3F);
             }
 
             regs[0] = 0;
@@ -232,309 +237,250 @@ namespace zonvm {
         }
 
         exec_l: {
-            word inst = *pc++;
-            byte rd     = (inst >> 7) & 0x1F;
+            word inst   = *pc++;
+            byte rd     = (inst >> 7)  & 0x1F;
             byte funct3 = (inst >> 12) & 0x7;
-            byte rs1    = (inst >> 15) & 0x1F;
-            int32_t imm     = static_cast<int32_t>(inst) >> 20;
-            
-            if (funct3 == LD) {
-                uintptr_t final_address = regs[rs1] + imm;
-                int64_t val;
-                if (rs1 == 2 || rs1 == 8) {
-                    std::memcpy(&val, &protected_ram[final_address], sizeof(int64_t));
-                    regs[rd] = val;
+            int32_t imm = static_cast<int32_t>(inst) >> 20;
 
-                } else if (rs1 == 3) {
-                    std::memcpy(&val, &data[final_address], sizeof(int64_t));
-                    regs[rd] = val; 
-                    
-                } else {
-                    uintptr_t pool_index = final_address - (code.size() * 4);
-                    if (pool_index + 8 <= pool_data.size()) {
-                        std::memcpy(&val, &pool_data[pool_index], sizeof(int64_t));
-                        regs[rd] = val;
-                    }
-                }
+            if (funct3 == LD) {
+                uintptr_t addr = static_cast<uintptr_t>(regs[(inst >> 15) & 0x1F]) + imm;
+                int64_t val;
+                std::memcpy(&val, &ram[addr], sizeof(int64_t));
+                regs[rd] = val;
             }
 
             regs[0] = 0;
             DISPATCH();
         }
 
-        exec_s : {
-            word inst = *pc++;
-            byte funct3 = (inst >> 12) & 0x7;
-            byte rs1 = (inst >> 15) & 0x1F;
-            byte rs2 = (inst >> 20) & 0x1F;
-
+        exec_s: {
+            word inst       = *pc++;
+            byte funct3     = (inst >> 12) & 0x7;
+            byte rs1        = (inst >> 15) & 0x1F;
+            byte rs2        = (inst >> 20) & 0x1F;
             int32_t imm_11_5 = (inst >> 25) & 0x7F;
-            int32_t imm_4_0  = (inst >> 7) & 0x1F;
-            int32_t imm = (imm_11_5 << 5) | imm_4_0;
-
-            if (imm & 0x800) {
-                imm |= 0xFFFFF000; 
-            }
+            int32_t imm_4_0  = (inst >> 7)  & 0x1F;
+            int32_t imm      = (imm_11_5 << 5) | imm_4_0;
+            if (imm & 0x800) imm |= 0xFFFFF000;
 
             if (funct3 == SD) {
-                uintptr_t final_address = regs[rs1] + imm;
-
-                if (rs1 == 2 || rs1 == 8) { 
-                    int64_t val = regs[rs2];
-                    std::memcpy(&protected_ram[final_address], &val, sizeof(int64_t));
-                    
-                } else if (rs1 == 3) {
-                    int64_t val = regs[rs2];
-                    std::memcpy(&data[final_address], &val, sizeof(int64_t));
-                    
-                } else {
-                    uintptr_t pool_index = final_address - (code.size() * 4);
-                    if (pool_index + 8 <= pool_data.size()) {
-                        int64_t val = regs[rs2];
-                        std::memcpy(&pool_data[pool_index], &val, sizeof(int64_t));
-                    }
-                }
-            }
-
-            DISPATCH();
-        }
-
-        exec_fs : {
-            word inst = *pc++;
-            byte funct3 = (inst >> 12) & 0x7;
-            byte rs1 = (inst >> 15) & 0x1F;
-            byte rs2 = (inst >> 20) & 0x1F;
-
-            int32_t imm_11_5 = (inst >> 25) & 0x7F;
-            int32_t imm_4_0  = (inst >> 7) & 0x1F;
-            int32_t imm = (imm_11_5 << 5) | imm_4_0;
-
-            if (imm & 0x800) {
-                imm |= 0xFFFFF000; 
-            }
-
-            if (funct3 == FSD) {
-                uintptr_t final_address = regs[rs1] + imm;
-
-                if (rs1 == 2 || rs1 == 8) {
-                    double val = fregs[rs2];
-                    std::memcpy(&protected_ram[final_address], &val, sizeof(double));
-                    
-                } else if (rs1 == 3) {
-                    if (final_address + 8 <= data.size()) {
-                        double val = fregs[rs2];
-                        std::memcpy(&data[final_address], &val, sizeof(double));
-                    }
-                } else {
-                    uintptr_t pool_index = final_address - (code.size() * 4);
-                    double val = fregs[rs2];
-                    if (pool_index + 8 <= pool_data.size()) {
-                        std::memcpy(&pool_data[pool_index], &val, sizeof(double));
-                    }
-                }
+                uintptr_t addr = static_cast<uintptr_t>(regs[rs1]) + imm;
+                int64_t val = regs[rs2];
+                std::memcpy(&ram[addr], &val, sizeof(int64_t));
             }
 
             DISPATCH();
         }
 
         exec_fl: {
-            word inst = *pc++;
-            byte rd     = (inst >> 7) & 0x1F;
-            uint32_t funct3 = (inst >> 12) & 0x7;
-            byte rs1    = (inst >> 15) & 0x1F;
-            
-            int32_t imm = (inst >> 20) & 0xFFF;
-            if (imm & 0x800) imm |= 0xFFFFF000;
+            word inst   = *pc++;
+            byte rd     = (inst >> 7)  & 0x1F;
+            byte funct3 = (inst >> 12) & 0x7;
+            int32_t imm = static_cast<int32_t>(inst) >> 20;
 
             if (funct3 == FLD) {
-                uintptr_t final_offset = regs[rs1] + imm;
+                uintptr_t addr = static_cast<uintptr_t>(regs[(inst >> 15) & 0x1F]) + imm;
                 double val;
-
-                if (rs1 == 2 || rs1 == 8) {
-                    std::memcpy(&val, &protected_ram[final_offset], sizeof(double));
-                    fregs[rd] = val;
-                    
-                } else if (rs1 == 3) {
-                    if (final_offset + 8 <= data.size()) {
-                        std::memcpy(&val, &data[final_offset], sizeof(double));
-                        fregs[rd] = val; 
-                    }
-                } else { 
-                    uintptr_t pool_index = final_offset - (code.size() * 4);
-                    if (pool_index + 8 <= pool_data.size()) {
-                        std::memcpy(&val, &pool_data[pool_index], sizeof(double));
-                        fregs[rd] = val;
-                    }
-                }
+                std::memcpy(&val, &ram[addr], sizeof(double));
+                fregs[rd] = val;
             }
+
+            DISPATCH();
+        }
+
+        exec_fs: {
+            word inst       = *pc++;
+            byte funct3     = (inst >> 12) & 0x7;
+            byte rs1        = (inst >> 15) & 0x1F;
+            byte rs2        = (inst >> 20) & 0x1F;
+            int32_t imm_11_5 = static_cast<int32_t>(inst) >> 25;
+            int32_t imm_4_0  = (inst >> 7) & 0x1F;
+            int32_t imm      = (imm_11_5 << 5) | imm_4_0;
+
+            if (funct3 == FSD) {
+                uintptr_t addr = static_cast<uintptr_t>(regs[rs1]) + imm;
+                double val = fregs[rs2];
+                std::memcpy(&ram[addr], &val, sizeof(double));
+            }
+
             DISPATCH();
         }
 
         exec_op_f: {
-            word inst = *pc++;
+            word inst   = *pc++;
             byte rd     = (inst >> 7)  & 0x1F;
             byte rm     = (inst >> 12) & 0x07;
             byte rs1    = (inst >> 15) & 0x1F;
             byte rs2    = (inst >> 20) & 0x1F;
             byte funct7 = (inst >> 25) & 0x7F;
-            
-            if (funct7 == FMV_D_X) {
-                fregs[rd] = std::bit_cast<double>(regs[rs1]);
-            }
-            else if (funct7 == FCVT_S_W) {
-                float f = static_cast<float>((int32_t)regs[rs1]);
-                fregs[rd] = (double)f;
-            } else if (funct7 == FSGNJ_S) {
-                uint32_t b1 = std::bit_cast<uint32_t>((float)fregs[rs1]);
-                uint32_t b2 = std::bit_cast<uint32_t>((float)fregs[rs2]);
-                fregs[rd] = (double)std::bit_cast<float>(perform_sign_injection<float, uint32_t>(b1, b2, rm));
+
+            if      (funct7 == FMV_D_X)       fregs[rd] = std::bit_cast<double>(regs[rs1]);
+            else if (funct7 == FCVT_S_W)      fregs[rd] = static_cast<double>(static_cast<float>(static_cast<int32_t>(regs[rs1])));
+            else if (funct7 == FCVT_D_L)      fregs[rd] = static_cast<double>(regs[rs1]);
+            else if (funct7 == FMV_W_X)       fregs[rd] = static_cast<double>(std::bit_cast<float>(static_cast<uint32_t>(regs[rs1])));
+            else if (funct7 == FSGNJ_S) {
+                uint32_t b1 = std::bit_cast<uint32_t>(static_cast<float>(fregs[rs1]));
+                uint32_t b2 = std::bit_cast<uint32_t>(static_cast<float>(fregs[rs2]));
+                fregs[rd] = static_cast<double>(std::bit_cast<float>(perform_sign_injection<float, uint32_t>(b1, b2, rm)));
             } else if (funct7 == FSGNJ_D) {
                 uint64_t b1 = std::bit_cast<uint64_t>(fregs[rs1]);
                 uint64_t b2 = std::bit_cast<uint64_t>(fregs[rs2]);
                 fregs[rd] = std::bit_cast<double>(perform_sign_injection<double, uint64_t>(b1, b2, rm));
-            } else if (funct7 == FMV_W_X) {
-                float f = std::bit_cast<float>((uint32_t)regs[rs1]);
-                fregs[rd] = (double)f;
             } else if (funct7 == STANDARD) {
-                float f1 = (float)fregs[rs1];
-                float f2 = (float)fregs[rs2];
-                fregs[rd] = (double)(f1 + f2);
-            } else if (funct7 == M_EXT_OR_FADD_D) {
-                fregs[rd] = fregs[rs1] + fregs[rs2];
+                fregs[rd] = static_cast<double>(static_cast<float>(fregs[rs1]) + static_cast<float>(fregs[rs2]));
+            } else if (funct7 == M_EXT_OR_FADD_D) { fregs[rd] = fregs[rs1] + fregs[rs2];
             } else if (funct7 == FSUB_S) {
-                float f1 = (float)fregs[rs1];
-                float f2 = (float)fregs[rs2];
-                fregs[rd] = (double)(f1 - f2);
-            } else if (funct7 == FSUB_D) {
-                fregs[rd] = fregs[rs1] - fregs[rs2];
+                fregs[rd] = static_cast<double>(static_cast<float>(fregs[rs1]) - static_cast<float>(fregs[rs2]));
+            } else if (funct7 == FSUB_D)  { fregs[rd] = fregs[rs1] - fregs[rs2];
             } else if (funct7 == FMUL_S) {
-                float f1 = (float)fregs[rs1];
-                float f2 = (float)fregs[rs2];
-                fregs[rd] = (double)(f1 * f2);
-            } else if (funct7 == FMUL_D) {
-                fregs[rd] = fregs[rs1] * fregs[rs2];
+                fregs[rd] = static_cast<double>(static_cast<float>(fregs[rs1]) * static_cast<float>(fregs[rs2]));
+            } else if (funct7 == FMUL_D)  { fregs[rd] = fregs[rs1] * fregs[rs2];
             } else if (funct7 == FDIV_S) {
-                float f1 = (float)fregs[rs1];
-                float f2 = (float)fregs[rs2];
-                if (std::abs(f2) < std::numeric_limits<float>::epsilon()) fregs[rd] = 0.0;
-                else fregs[rd] = (double)(f1 / f2);
+                float f2 = static_cast<float>(fregs[rs2]);
+                fregs[rd] = (std::abs(f2) < std::numeric_limits<float>::epsilon())
+                          ? 0.0 : static_cast<double>(static_cast<float>(fregs[rs1]) / f2);
             } else if (funct7 == FDIV_D) {
                 double f2 = fregs[rs2];
-                if (std::abs(f2) < std::numeric_limits<double>::epsilon()) fregs[rd] = 0.0;
-                else fregs[rd] = fregs[rs1] / f2;
+                fregs[rd] = (std::abs(f2) < std::numeric_limits<double>::epsilon())
+                          ? 0.0 : fregs[rs1] / f2;
             } else if (funct7 == FCOMP_S) {
-                float f1 = (float)fregs[rs1];
-                float f2 = (float)fregs[rs2];
-                int64_t res = 0;
-                if (rm == 0x00) res = (f1 <= f2) ? 1 : 0;
-                if (rm == 0x01) res = (f1 < f2) ? 1 : 0;
-                if (rm == 0x02) res = (f1 == f2) ? 1 : 0;
-                regs[rd] = res;
-            } 
-         
+                float f1 = static_cast<float>(fregs[rs1]);
+                float f2 = static_cast<float>(fregs[rs2]);
+                if      (rm == 0x00) regs[rd] = (f1 <= f2) ? 1 : 0;
+                else if (rm == 0x01) regs[rd] = (f1 <  f2) ? 1 : 0;
+                else if (rm == 0x02) regs[rd] = (f1 == f2) ? 1 : 0;
+            } else if (funct7 == FCOMP_D) {
+                if      (rm == 0x00) regs[rd] = (fregs[rs1] <= fregs[rs2]) ? 1 : 0;
+                else if (rm == 0x01) regs[rd] = (fregs[rs1] <  fregs[rs2]) ? 1 : 0;
+                else if (rm == 0x02) regs[rd] = (fregs[rs1] == fregs[rs2]) ? 1 : 0;
+            }
+
             DISPATCH();
         }
 
         exec_op_b: {
-            word inst = *pc++;
-            uint64_t b12   = (inst >> 31) & 0x1;
-            uint64_t b11   = (inst >> 7)  & 0x1;
-            uint64_t b10_5 = (inst >> 25) & 0x3F;
-            uint64_t b4_1  = (inst >> 8)  & 0xF;
-            
-            uint64_t comb = (b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1);
-            int64_t offset = sext(comb, 13);
+            word inst    = *pc++;
+            uint64_t b12  = (inst >> 31) & 0x1;
+            uint64_t b11  = (inst >> 7)  & 0x1;
+            uint64_t b105 = (inst >> 25) & 0x3F;
+            uint64_t b41  = (inst >> 8)  & 0xF;
+            int64_t offset = sext((b12 << 12) | (b11 << 11) | (b105 << 5) | (b41 << 1), 13);
 
-            int64_t v1 = regs[((inst >> 15) & 0x1F)];
-            int64_t v2 = regs[((inst >> 20) & 0x1F)];
+            int64_t v1  = regs[(inst >> 15) & 0x1F];
+            int64_t v2  = regs[(inst >> 20) & 0x1F];
             byte funct3 = (inst >> 12) & 0x7;
-            bool take = false;
+            bool take   = false;
 
-            if (funct3 == BEQ) take = (v1 == v2);
-            else if (funct3 == BNE) take = (v1 != v2);
-            else if (funct3 == BLT) take = (v1 < v2);
-            else if (funct3 == BGE) take = (v1 >= v2);
-            else if (funct3 == BLTU) take = ((uint64_t)v1 < (uint64_t)v2);
-            else if (funct3 == BGEU) take = ((uint64_t)v1 >= (uint64_t)v2);
+            if      (funct3 == BEQ)  take = (v1 == v2);
+            else if (funct3 == BNE)  take = (v1 != v2);
+            else if (funct3 == BLT)  take = (v1 <  v2);
+            else if (funct3 == BGE)  take = (v1 >= v2);
+            else if (funct3 == BLTU) take = (static_cast<uint64_t>(v1) <  static_cast<uint64_t>(v2));
+            else if (funct3 == BGEU) take = (static_cast<uint64_t>(v1) >= static_cast<uint64_t>(v2));
 
             if (take) pc = (pc - 1) + (offset / 4);
-            
             DISPATCH();
         }
 
         exec_jal: {
-            word inst = *pc++;
-            byte rd = (inst >> 7) & 0x1F;
-            uint64_t off20     = (inst >> 31) & 0x1;
-            uint64_t off19_12 = (inst >> 12) & 0xFF;
-            uint64_t off11     = (inst >> 20) & 0x1;
-            uint64_t off10_1  = (inst >> 21) & 0x3FF;
+            word inst     = *pc++;
+            byte rd       = (inst >> 7) & 0x1F;
+            uint64_t off20   = (inst >> 31) & 0x1;
+            uint64_t off1912 = (inst >> 12) & 0xFF;
+            uint64_t off11   = (inst >> 20) & 0x1;
+            uint64_t off101  = (inst >> 21) & 0x3FF;
+            int64_t offset   = sext((off20 << 20) | (off1912 << 12) | (off11 << 11) | (off101 << 1), 21);
 
-            uint64_t comb = (off20 << 20) | (off19_12 << 12) | (off11 << 11) | (off10_1 << 1);
-            int64_t offset = sext(comb, 21);
-
-            if (rd != 0) {
-                regs[rd] = pc - code.data();
-            }
-
+            if (rd != 0) regs[rd] = pc - text_base;
             pc = (pc - 1) + (offset / 4);
             DISPATCH();
         }
 
-        exec_jalr : {
-            word inst = *pc++;
-            byte rd = (inst >> 7) & 0x1F;
-            int64_t v1 = regs[((inst >> 15) & 0x1F)];
-            int64_t immI = sext(((inst >> 20) & 0xFFF), 12);
+        exec_jalr: {
+            word inst  = *pc++;
+            byte rd    = (inst >> 7) & 0x1F;
+            int64_t v1 = regs[(inst >> 15) & 0x1F];
+            int64_t imm = sext((inst >> 20) & 0xFFF, 12);
 
-            if (rd != 0) {
-                regs[rd] = pc - code.data();
-            }
-
-            int64_t target_instruction_index = v1 + (immI / 4);
-            pc = code.data() + target_instruction_index;
-
+            if (rd != 0) regs[rd] = pc - text_base;
+            pc = text_base + v1 + (imm / 4);
             DISPATCH();
         }
 
         exec_ecall: {
             pc++;
-            int64_t service = regs[17];
-            switch (service)
-            {
+            switch (static_cast<int64_t>(regs[17])) {
+
                 case EXIT: {
-                    uint8_t exit_code = static_cast<uint8_t>(regs[10]);
-                    free_protected_ram(protected_ram, RAM_SIZE);
-                    std::exit(exit_code);
+                    uint8_t code = static_cast<uint8_t>(regs[10]);
+                    free_ram(ram);
+                    std::exit(code);
+                }
+                case IPRINT: std::printf("%ld",   regs[10]); break;
+                case FPRINT: std::printf("%.15g", fregs[10]); break;
+                case BPRINT: std::printf("%s",    regs[10] ? "true" : "false"); break;
+                case SPRINT: {
+                    uint64_t ptr = regs[10];
+                    uint64_t len;
+                    std::memcpy(&len, &ram[ptr], sizeof(uint64_t));
+                    const char* data = reinterpret_cast<const char*>(&ram[ptr + 8]);
+                    std::fwrite(data, 1, len, stdout);
                     break;
                 }
-                case IPRINT: {
-                    std::printf("%ld\n", regs[10]);
+                case EPRINT: std::printf("\n"); break;
+
+                case HEAP_PUSH: {
+                    arena_stack.push_back(heap_bump);
                     break;
                 }
-                case FPRINT: {
-                    std::printf("%.15g\n", fregs[10]);
+                case HEAP_POP: {
+                    if (!arena_stack.empty()) {
+                        heap_bump = arena_stack.back();
+                        arena_stack.pop_back();
+                    }
                     break;
                 }
-                case BPRINT: {
-                    std::printf("%s\n", regs[10] ? "true" : "false");
+                case HEAP_ALLOC: {
+                    uint64_t size = (static_cast<uint64_t>(regs[10]) + 7) & ~7ULL;
+                    uint32_t stack_guard = static_cast<uint32_t>(RAM_SIZE - STACK_LIMIT);
+                    if (heap_bump + size >= stack_guard) {
+                        std::cerr << "[zon error]: out of memory (heap colisiona con stack)\n";
+                        free_ram(ram);
+                        std::exit(1);
+                    }
+                    regs[10]  = heap_bump;
+                    heap_bump += static_cast<uint32_t>(size);
                     break;
                 }
-                default: {
-                    std::cerr << "[zon error]: unknown ecall service(" << service << ")\n";
-                    free_protected_ram(protected_ram, RAM_SIZE);
+                case HEAP_STORE: {
+                    uintptr_t ptr = static_cast<uintptr_t>(regs[10]);
+                    int64_t   val = regs[11];
+                    std::memcpy(&ram[ptr], &val, 8);
+                    break;
+                }
+                case HEAP_LOAD: {
+                    uintptr_t ptr = static_cast<uintptr_t>(regs[10]);
+                    int64_t   val;
+                    std::memcpy(&val, &ram[ptr], 8);
+                    regs[10] = val;
+                    break;
+                }
+
+                default:
+                    std::cerr << "[zon error]: unknown ecall (" << regs[17] << ")\n";
+                    free_ram(ram);
                     std::exit(1);
-                    break;
-                }
             }
-            
             DISPATCH();
         }
 
         unknown_op: {
-            std::cerr << "Opcode desconocido" << std::endl;
-            free_protected_ram(protected_ram, RAM_SIZE);
+            std::cerr << "[zon error]: opcode desconocido\n";
+            free_ram(ram);
             return;
         }
+
+        #undef DISPATCH
     }
-}
+
+} // namespace zonvm
