@@ -230,6 +230,10 @@ namespace zonvm {
             } else if (funct7 == ALT) {
                 if      (funct3 == ADD_SUB)          regs[rd] = v1 - v2;
                 else if (funct3 == SRL_SRA_SRLI_SRAI) regs[rd] = v1 >> (v2 & 0x3F);
+                else if (funct3 == AND_ANDI) regs[rd] = ~(v1 & v2);
+                else if (funct3 == OR_ORI) regs[rd] = ~(v1 | v2);
+                else if (funct3 == XOR_XORI) regs[rd] = ~(v1 ^ v2);
+                
             }
 
             regs[0] = 0;
