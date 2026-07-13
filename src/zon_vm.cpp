@@ -466,6 +466,22 @@ void VM::run() {
                 break;
             }
 
+            // -- stack manage --
+            case FILL_ZERO_STACK: {
+                uint64_t vm_memory_address = regs[10];
+                uint64_t total_bytes = regs[11];
+                
+                if (vm_memory_address + total_bytes <= RAM_SIZE) {
+                    uint8_t* real_memory_ptr = ram + vm_memory_address;
+                    std::memset(real_memory_ptr, 0, total_bytes);
+
+                } else {
+                    // TODO: -> ERROR SegFault / Out of bounds memory access in VM
+                }
+                break;
+            }
+
+
             // -- heap arena --
             case HEAP_PUSH: {
                 arena_stack.push_back(heap_bump);
@@ -502,6 +518,27 @@ void VM::run() {
                 std::memcpy(&val, &ram[ptr], 8);
                 regs[10] = val;
                 break;
+            }
+
+            // -- error message in runtime --
+            case OUT_BOUND_INDEX_ERR: {
+                uint32_t* code_start = reinterpret_cast<uint32_t*>(ram);
+                uint32_t bytecode_pc = ((pc - 1) - code_start) * 4; 
+
+                std::cerr << "error[E6001]: Index out of bounds!\n";
+                std::cerr << "  --> runtime_panic at bytecode offset: " << bytecode_pc << "\n";
+                std::cerr << "   |\n";
+                std::cerr << "   | Instruction PC: " << bytecode_pc << " (check your .zonasm output at this address)\n";
+                std::cerr << "   |\n";
+                std::cerr << "  = note: In Zonetic, arrays are strictly bounds-checked. Accessing an\n";
+                std::cerr << "          index outside [0, SIZE - 1] is illegal to guarantee memory safety.\n\n";
+                
+                std::cerr << " [ o_0] <(\"Ouch! You're trying to step outside the safe boundaries of your array.\n";
+                std::cerr << "           I checked the index at PC " << bytecode_pc << " and it's out of range.\n";
+                std::cerr << "           Double check your loops or variables to make sure they stay within limits!\")\n\n";
+
+                free_ram(ram);
+                std::exit(1);
             }
 
             default:
