@@ -109,6 +109,8 @@ namespace zonvm {
         HEAP_ALLOC = -102,
         HEAP_STORE = -103,
         HEAP_LOAD = -104,
+        FILL_ZERO_STACK = -200,
+        OUT_BOUND_INDEX_ERR = -900,
         EXIT = 93
     };
 } 
